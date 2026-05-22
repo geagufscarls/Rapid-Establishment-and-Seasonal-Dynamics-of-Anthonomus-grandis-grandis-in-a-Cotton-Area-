@@ -1,0 +1,161 @@
+
+# SEASONAL BOLL WEEVIL DAMAGE – PREDICTIVE MODEL
+# (WEEKLY INCREMENT + CUMULATIVE RECONSTRUCTION)
+
+library(tidyverse)
+library(lubridate)
+library(Metrics)
+
+
+dados <- read.csv("season.csv", sep = ";", dec = ",")
+
+
+colnames(dados)[1] <- "linha"
+
+dados <- dados %>%
+  separate(
+    col = linha,
+    into = c(
+      "data",
+      "Totalatacado",
+      "totalestrutura",
+      "tempmedia",
+      "umidade",
+      "ventoms",
+      "tempmax",
+      "tempmin"
+    ),
+    sep = ","
+  ) %>%
+  mutate(
+    data = dmy(data),
+    across(-data, as.numeric)
+  )
+
+
+dados <- dados %>%
+  mutate(
+    season = case_when(
+      year(data) == 2023 ~ "2022/2023",
+      year(data) == 2024 ~ "2023/2024",
+      year(data) == 2025 ~ "2024/2025"
+    )
+  )
+
+dados$season <- factor(
+  dados$season,
+  levels = c("2022/2023", "2023/2024", "2024/2025")
+)
+
+dados <- dados %>%
+  group_by(season) %>%
+  arrange(data) %>%
+  mutate(week_rel = row_number()) %>%
+  ungroup()
+
+
+dados <- dados %>%
+  mutate(
+    damage_pct = 100 * Totalatacado / totalestrutura
+  )
+
+
+dados <- dados %>%
+  group_by(season) %>%
+  arrange(week_rel) %>%
+  mutate(
+    damage_inc = damage_pct
+  ) %>%
+  ungroup()
+
+train <- dados %>% filter(season %in% c("2022/2023", "2023/2024"))
+test  <- dados %>% filter(season == "2024/2025")
+
+
+model <- lm(
+  damage_inc ~ week_rel + I(week_rel^2) + tempmedia + umidade,
+  data = train
+)
+
+summary(model)
+
+test$predicted_inc <- predict(model, newdata = test)
+
+# Prevent biologically impossible values
+test$predicted_inc <- pmax(test$predicted_inc, 0)
+
+
+test <- test %>%
+  arrange(week_rel) %>%
+  mutate(
+    predicted_cum = cumsum(predicted_inc),
+    damage_cum    = cumsum(damage_inc)
+  )
+
+dados <- dados %>%
+  group_by(season) %>%
+  arrange(week_rel) %>%
+  mutate(
+    damage_cum = cumsum(damage_inc)
+  ) %>%
+  ungroup()
+
+
+r2_true <- cor(
+  test$damage_cum,
+  test$predicted_cum,
+  use = "complete.obs"
+)^2
+
+rmse_val <- rmse(
+  test$damage_cum,
+  test$predicted_cum
+)
+
+r2_true
+rmse_val
+
+plot_data <- dados %>%
+  mutate(
+    curve = case_when(
+      season == "2022/2023" ~ "2022/23",
+      season == "2023/2024" ~ "2023/24",
+      season == "2024/2025" ~ "2024/25 Real"
+    )
+  )
+
+pred_curve <- test %>%
+  mutate(curve = "2024/25 Predicted")
+
+fig <- ggplot() +
+  geom_line(
+    data = plot_data,
+    aes(x = week_rel, y = damage_cum, color = curve),
+    linewidth = 1
+  ) +
+  geom_line(
+    data = pred_curve,
+    aes(x = week_rel, y = predicted_cum, color = curve),
+    linewidth = 1,
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Cumulative seasonal damage and predictive model for the 2024/2025 season",
+    x = "Weeks after first detection",
+    y = "Cumulative damaged structures (%)",
+    color = ""
+  ) +
+  theme_minimal(base_size = 13)
+
+fig
+
+
+dir.create("figures", showWarnings = FALSE)
+
+ggsave(
+  "figures/Figure_cumulative_seasonal_damage.png",
+  fig,
+  width = 9,
+  height = 5,
+  dpi = 300
+)
